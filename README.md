@@ -55,8 +55,9 @@ All Shopify Admin API calls are proxied through `tyz-actions-access.vercel.app` 
                           v                  v
                    sgc-production        sgc-staging
                           |                  |
-                          | (sync files)     | (sync files)
-                          v                  v
+                          | (json→prod       | (no sync;
+                          |  + rebase)       |  staging never backfills)
+                          v                  -
   PR merged --------> production -------> staging
   (pull_request)         |    (rebase)       |
        |                 |                   |
@@ -87,10 +88,10 @@ PUSH EVENTS:
 
 sgc-production push ("Update from Shopify")
   └─> Sync Shopify files from sgc-production --> production
+      (when back sync enabled: .json only, then rebase staging)
 
 sgc-staging push ("Update from Shopify")
-  └─> Sync Shopify files from sgc-staging --> staging
-      (DISABLE_SGC_BACK_SYNC restricts to .json files only when enabled)
+  └─> Skipped (staging never backfills from sgc-staging)
 
 production push
   ├─> If from Horizon sync or staging merge:
@@ -167,7 +168,11 @@ PR merged into production
 - Reuses existing blobs where possible to minimise API calls
 - Falls back to a merge commit if tree-based sync fails
 
-**SGC back sync control:** When `DISABLE_SGC_BACK_SYNC` is set to `true`, only `.json` files are synced from `sgc-staging` into `staging` (no Liquid, CSS, JS, assets, etc.). This lets you pull in settings/config changes from Shopify without overwriting code changes in staging.
+**SGC back sync control:** When `DISABLE_SGC_BACK_SYNC` is **false** or unset (back sync enabled):
+- **sgc-production → production**: Only `.json` files are synced (no Liquid, CSS, JS, assets). Staging is then automatically rebased onto production.
+- **sgc-staging → staging**: Never backfills (staging does not sync from SGC)
+
+When `DISABLE_SGC_BACK_SYNC` is **true** (back sync disabled): No sync from sgc-production or sgc-staging to their parent branches.
 
 ---
 
@@ -267,7 +272,7 @@ PR merged into production
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DISABLE_SGC_BACK_SYNC` | `false` (full sync) | Set to `true` to restrict the sync from `sgc-staging` to `staging` to `.json` files only. Code and assets are left untouched. Configure via **Settings > Secrets and variables > Actions > Variables**. |
+| `DISABLE_SGC_BACK_SYNC` | `false` (back sync enabled) | When `false` or unset: sgc-production → production syncs `.json` only + rebase staging; sgc-staging never backfills. When `true`: all back sync disabled. Configure via **Settings > Secrets and variables > Actions > Variables**. |
 
 ---
 
@@ -336,7 +341,7 @@ All GitHub API calls are wrapped with rate-limiting protection (`utils/rate-limi
 2. Create `sgc-production` and `sgc-staging` branches containing only Shopify theme files
 3. Connect the SGC branches to Shopify via the GitHub Connector
 4. Optionally create `sgc-production-one-way` and/or `sgc-staging-one-way` branches for read-only theme mirrors
-5. Optionally set the `DISABLE_SGC_BACK_SYNC` repository variable to restrict `sgc-staging` → `staging` sync to `.json` files only.
+5. Optionally set the `DISABLE_SGC_BACK_SYNC` repository variable to `true` to disable all back sync. When `false` or unset, production gets `.json`-only backfill + staging rebase; staging never backfills.
 
 ### Development
 

@@ -102,19 +102,22 @@ webhooks.on("push", async ({ payload }) => {
   switch (payload.ref) {
     case "refs/heads/sgc-production":
       if (headCommitMessage.includes("update from shopify")) {
-        await updateParentOnSGCPush(octokit, owner, repo, "production");
+        // When DISABLE_SGC_BACK_SYNC is false (back sync enabled): JSON-only backfill to production, then rebase staging
+        const disableSgcBackSync = await getRepoVariable(octokit, owner, repo, "DISABLE_SGC_BACK_SYNC");
+        if (disableSgcBackSync?.toLowerCase() === "true") {
+          console.log(`[${owner}/${repo}] DISABLE_SGC_BACK_SYNC - skipping sgc-production to production sync`);
+          break;
+        }
+        console.log(`[${owner}/${repo}] Back sync enabled - syncing only .json files from sgc-production to production, then rebasing staging`);
+        await updateParentOnSGCPush(octokit, owner, repo, "production", true);
+        await updateStagingOnProductionPush(octokit, owner, repo);
       }
       break;
 
     case "refs/heads/sgc-staging":
       if (headCommitMessage.includes("update from shopify")) {
-        // When DISABLE_SGC_BACK_SYNC is set, only sync .json files (no code/assets). Otherwise full sync.
-        const disableSgcBackSync = await getRepoVariable(octokit, owner, repo, "DISABLE_SGC_BACK_SYNC");
-        const jsonOnly = disableSgcBackSync?.toLowerCase() === "true";
-        if (jsonOnly) {
-          console.log(`[${owner}/${repo}] DISABLE_SGC_BACK_SYNC enabled - syncing only .json files from sgc-staging to staging`);
-        }
-        await updateParentOnSGCPush(octokit, owner, repo, "staging", jsonOnly);
+        // Staging never backfills from sgc-staging
+        console.log(`[${owner}/${repo}] Skipping sgc-staging to staging sync (staging does not backfill)`);
       }
       break;
 

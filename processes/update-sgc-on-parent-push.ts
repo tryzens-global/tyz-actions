@@ -323,10 +323,10 @@ export async function syncToOneWayBranch(octokit: any, owner: string, repo: stri
   }
 }
 
-export async function updateSGCOnParentPush(octokit: any, owner: string, repo: string, includeJsonFiles: boolean = false, parent: "staging" | "production") {
+export async function updateSGCOnParentPush(octokit: any, owner: string, repo: string, includeJsonFiles: boolean = false, parent: "staging" | "production" | "release") {
   try {
-    // Automatically include JSON files when updating sgc-staging
-    const shouldIncludeJson = includeJsonFiles || parent === "staging";
+    // Automatically include JSON files when updating sgc-staging or sgc-release
+    const shouldIncludeJson = includeJsonFiles || parent === "staging" || parent === "release";
 
     // Get the latest commit SHA from ${parent} branch
     const parentRef = await rateLimitedRequest(

@@ -6,6 +6,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 
 import { updateParentOnSGCPush } from "../processes/update-parent-on-sgc-push.js";
 import { updateStagingOnProductionPush } from "../processes/update-staging-on-production-push.js";
+import { updateReleaseOnStagingPush } from "../processes/update-release-on-staging-push.js";
 import { updateSGCOnParentPush, syncToOneWayBranch } from "../processes/update-sgc-on-parent-push.js";
 import { handlePreviewTheme, deletePreviewTheme } from "../processes/handle-preview-theme.js";
 
@@ -108,9 +109,10 @@ webhooks.on("push", async ({ payload }) => {
           console.log(`[${owner}/${repo}] DISABLE_SGC_BACK_SYNC - skipping sgc-production to production sync`);
           break;
         }
-        console.log(`[${owner}/${repo}] Back sync enabled - syncing only .json files from sgc-production to production, then rebasing staging`);
+        console.log(`[${owner}/${repo}] Back sync enabled - syncing only .json files from sgc-production to production, then rebasing staging and release`);
         await updateParentOnSGCPush(octokit, owner, repo, "production", true);
         await updateStagingOnProductionPush(octokit, owner, repo);
+        await updateReleaseOnStagingPush(octokit, owner, repo);
       }
       break;
 
@@ -121,21 +123,31 @@ webhooks.on("push", async ({ payload }) => {
       }
       break;
 
+    case "refs/heads/sgc-release":
+      if (headCommitMessage.includes("update from shopify")) {
+        // Release never backfills from sgc-release
+        console.log(`[${owner}/${repo}] Skipping sgc-release to release sync (release does not backfill)`);
+      }
+      break;
+
     case "refs/heads/sgc-production-one-way":
     case "refs/heads/sgc-staging-one-way":
+    case "refs/heads/sgc-release-one-way":
       // One-way branches receive updates but NEVER sync back to any parent branch
       console.log(`[${owner}/${repo}] ${payload.ref.replace("refs/heads/", "")} updated - skipping sync back (one-way branch)`);
       break;
 
     case "refs/heads/production":
       const productionUpdatedFromSGC = async () => {
-        console.log(`[${owner}/${repo}] Production Update from SGC! Rebasing Staging Onto Production`);
+        console.log(`[${owner}/${repo}] Production Update from SGC! Rebasing Staging Onto Production, then Release Onto Staging`);
         await updateStagingOnProductionPush(octokit, owner, repo);
+        await updateReleaseOnStagingPush(octokit, owner, repo);
       }
 
       const mergeFromHorizonSyncOrStaging = async () => {
-        console.log(`[${owner}/${repo}] Merge From Horizon Sync or Staging! Rebasing Staging Onto Production`);
+        console.log(`[${owner}/${repo}] Merge From Horizon Sync or Staging! Rebasing Staging Onto Production, then Release Onto Staging`);
         await updateStagingOnProductionPush(octokit, owner, repo);
+        await updateReleaseOnStagingPush(octokit, owner, repo);
       }
 
       // Handle Staging Updates
@@ -162,10 +174,30 @@ webhooks.on("push", async ({ payload }) => {
     case "refs/heads/staging":
       await updateSGCOnParentPush(octokit, owner, repo, false, "staging");
 
+      // Rebase release onto staging when DISABLE_SGC_BACK_SYNC is false (keeps release in sync)
+      const disableSgcBackSyncForStaging = await getRepoVariable(octokit, owner, repo, "DISABLE_SGC_BACK_SYNC");
+      if (disableSgcBackSyncForStaging?.toLowerCase() !== "true") {
+        await updateReleaseOnStagingPush(octokit, owner, repo);
+      }
+
       // Sync to sgc-staging-one-way if it exists (one-way sync, never syncs back)
       if (await checkBranchExists(octokit, owner, repo, "sgc-staging-one-way")) {
         console.log(`[${owner}/${repo}] Syncing staging to sgc-staging-one-way...`);
         await syncToOneWayBranch(octokit, owner, repo, "staging", "sgc-staging-one-way");
+      }
+      break;
+
+    case "refs/heads/release":
+      // Optional: only sync to sgc-release if that branch exists
+      if (await checkBranchExists(octokit, owner, repo, "sgc-release")) {
+        console.log(`[${owner}/${repo}] Syncing release to sgc-release...`);
+        await updateSGCOnParentPush(octokit, owner, repo, true, "release");
+      }
+
+      // Sync to sgc-release-one-way if it exists
+      if (await checkBranchExists(octokit, owner, repo, "sgc-release-one-way")) {
+        console.log(`[${owner}/${repo}] Syncing release to sgc-release-one-way...`);
+        await syncToOneWayBranch(octokit, owner, repo, "release", "sgc-release-one-way");
       }
       break;
     default:

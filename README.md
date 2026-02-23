@@ -13,8 +13,9 @@ Deployed as a Vercel serverless function that listens for GitHub webhook events 
   - [SGC to Parent Sync](#1-sgc-to-parent-sync)
   - [Parent to SGC Sync](#2-parent-to-sgc-sync)
   - [Staging Rebase on Production](#3-staging-rebase-on-production)
-  - [One-Way Branch Sync](#4-one-way-branch-sync)
-  - [Preview Theme Management](#5-preview-theme-management)
+  - [Release Rebase on Staging](#4-release-rebase-on-staging)
+  - [One-Way Branch Sync](#5-one-way-branch-sync)
+  - [Preview Theme Management](#6-preview-theme-management)
 - [Labels](#labels)
 - [Repository Variables](#repository-variables)
 - [Synced Folders](#synced-folders)
@@ -49,35 +50,31 @@ All Shopify Admin API calls are proxied through `tyz-actions-access.vercel.app` 
 
 ```
                          Shopify GitHub Connector
-                          |                  |
-                    "Update from Shopify"    "Update from Shopify"
-                          |                  |
-                          v                  v
-                   sgc-production        sgc-staging
-                          |                  |
-                          | (json→prod       | (no sync;
-                          |  + rebase)       |  staging never backfills)
-                          v                  -
-  PR merged --------> production -------> staging
-  (pull_request)         |    (rebase)       |
-       |                 |                   |
-       |          (sync files)        (sync files)
-       |                 |                   |
-       |                 v                   v
-       |          sgc-production        sgc-staging
-       |
+                          |                  |                  |
+                    "Update from Shopify"    "Update from Shopify"   "Update from Shopify"
+                          |                  |                  |
+                          v                  v                  v
+                   sgc-production        sgc-staging        sgc-release (optional)
+                          |                  |                  |
+                          | (json→prod       | (no sync;        | (no sync;
+                          |  + rebase        |  staging         |  release
+                          |  chain)          |  never backfills) |  never backfills)
+                          v                  -                  -
+  PR merged --------> production -------> staging -------> release (optional)
+  (pull_request)         |    (rebase)       |    (rebase)       |
+       |                 |                   |                   |
+       |          (sync files)        (sync files)        (sync files)
+       |                 |                   |                   |
+       |                 v                   v                   v
+       |          sgc-production        sgc-staging        sgc-release
        |
        |    (if 'sync-settings' label or sync/horizon-* branch)
        |          JSON files included in sgc-production sync
        |
-       |
        ├── (if 'preview' label) --> Create/Update Shopify Preview Theme
        |
-       |
-       v                                     v
-  sgc-production-one-way (optional)    sgc-staging-one-way (optional)
-  (syncs from production,              (syncs from staging,
-   never syncs back)                    never syncs back)
+       v                                     v                                     v
+  sgc-production-one-way (optional)    sgc-staging-one-way (optional)    sgc-release-one-way (optional)
 ```
 
 ### Detailed Event Flow
@@ -88,28 +85,34 @@ PUSH EVENTS:
 
 sgc-production push ("Update from Shopify")
   └─> Sync Shopify files from sgc-production --> production
-      (when back sync enabled: .json only, then rebase staging)
+      (when back sync enabled: .json only, then rebase staging, then rebase release onto staging)
 
 sgc-staging push ("Update from Shopify")
   └─> Skipped (staging never backfills from sgc-staging)
 
+sgc-release push ("Update from Shopify")
+  └─> Skipped (release never backfills from sgc-release)
+
 production push
   ├─> If from Horizon sync or staging merge:
-  |     └─> Rebase staging onto production
+  |     └─> Rebase staging onto production, then rebase release onto staging
   ├─> If from SGC sync:
-  |     └─> Rebase staging onto production
+  |     └─> Rebase staging onto production, then rebase release onto staging
   └─> If sgc-production-one-way exists:
         └─> Sync Shopify files from production --> sgc-production-one-way
 
 staging push
   ├─> Sync Shopify files from staging --> sgc-staging
+  ├─> If back sync enabled: rebase release onto staging
   └─> If sgc-staging-one-way exists:
         └─> Sync Shopify files from staging --> sgc-staging-one-way
 
-sgc-production-one-way push
-  └─> (no-op, never syncs back)
+release push
+  ├─> If sgc-release exists: sync Shopify files from release --> sgc-release
+  └─> If sgc-release-one-way exists:
+        └─> Sync Shopify files from release --> sgc-release-one-way
 
-sgc-staging-one-way push
+sgc-production-one-way / sgc-staging-one-way / sgc-release-one-way push
   └─> (no-op, never syncs back)
 
 
@@ -145,8 +148,11 @@ PR merged into production
 
 | Branch | Source | Description |
 |--------|--------|-------------|
+| `release` | N/A | Sits between staging and production in the flow: release > staging > production. Automatically rebased onto staging when staging is updated (when back sync enabled). |
+| `sgc-release` | `release` | Shopify GitHub Connector branch for the **release** theme. Optional; only synced when the branch exists. |
 | `sgc-production-one-way` | `production` | Receives Shopify file updates from `production` but **never syncs back**. Useful for connecting a read-only Shopify theme that mirrors production without risk of circular updates. |
 | `sgc-staging-one-way` | `staging` | Receives Shopify file updates from `staging` but **never syncs back**. Useful for connecting a read-only Shopify theme that mirrors staging without risk of circular updates. |
+| `sgc-release-one-way` | `release` | Receives Shopify file updates from `release` but **never syncs back**. Optional. |
 
 > One-way branches are automatically detected. If the branch exists in the repository, syncing is enabled. If it doesn't exist, it's silently skipped.
 
@@ -169,10 +175,12 @@ PR merged into production
 - Falls back to a merge commit if tree-based sync fails
 
 **SGC back sync control:** When `DISABLE_SGC_BACK_SYNC` is **false** or unset (back sync enabled):
-- **sgc-production → production**: Only `.json` files are synced (no Liquid, CSS, JS, assets). Staging is then automatically rebased onto production.
+- **sgc-production → production**: Only `.json` files are synced (no Liquid, CSS, JS, assets). Staging is then rebased onto production, then release onto staging (if release exists).
 - **sgc-staging → staging**: Never backfills (staging does not sync from SGC)
+- **sgc-release → release**: Never backfills (release does not sync from SGC)
+- **staging push**: Release is rebased onto staging (if release exists)
 
-When `DISABLE_SGC_BACK_SYNC` is **true** (back sync disabled): No sync from sgc-production or sgc-staging to their parent branches.
+When `DISABLE_SGC_BACK_SYNC` is **true** (back sync disabled): No sync from sgc-production or sgc-staging to their parent branches; staging push does not rebase release.
 
 ---
 
@@ -182,6 +190,7 @@ When `DISABLE_SGC_BACK_SYNC` is **true** (back sync disabled): No sync from sgc-
 
 **Trigger:**
 - Push to `staging` --> syncs to `sgc-staging` (always includes JSON files)
+- Push to `release` --> syncs to `sgc-release` (if sgc-release exists; includes JSON files)
 - PR merged into `production` --> syncs to `sgc-production` (JSON files only with `sync-settings` label or `sync/horizon-*` branch)
 
 **What it does:** Syncs Shopify theme files from a parent branch into its corresponding SGC branch so that Shopify picks up the changes via the GitHub Connector.
@@ -208,13 +217,28 @@ When `DISABLE_SGC_BACK_SYNC` is **true** (back sync disabled): No sync from sgc-
 
 ---
 
-### 4. One-Way Branch Sync
+### 4. Release Rebase on Staging
+
+**File:** `processes/update-release-on-staging-push.ts`
+
+**Trigger:** After staging is rebased (from production push or sgc-production back sync), or on push to `staging` (when back sync enabled)
+
+**What it does:** Keeps `release` in sync with `staging` by rebasing release onto the latest staging commit. Only runs when the optional `release` branch exists.
+
+- Creates a new commit with staging's tree and staging as the parent
+- Force-updates the release branch reference
+- Skips if release branch does not exist or is already up to date with staging
+
+---
+
+### 5. One-Way Branch Sync
 
 **File:** `processes/update-sgc-on-parent-push.ts` (`syncToOneWayBranch`)
 
 **Trigger:**
 - Push to `production` --> syncs to `sgc-production-one-way` (if it exists)
 - Push to `staging` --> syncs to `sgc-staging-one-way` (if it exists)
+- Push to `release` --> syncs to `sgc-release-one-way` (if it exists)
 
 **What it does:** Syncs Shopify theme files from a parent branch to its one-way counterpart. One-way branches are designed to be connected to Shopify themes that should mirror a parent branch but never push changes back.
 
@@ -225,7 +249,7 @@ When `DISABLE_SGC_BACK_SYNC` is **true** (back sync disabled): No sync from sgc-
 
 ---
 
-### 5. Preview Theme Management
+### 6. Preview Theme Management
 
 **File:** `processes/handle-preview-theme.ts`
 
@@ -340,8 +364,9 @@ All GitHub API calls are wrapped with rate-limiting protection (`utils/rate-limi
 1. Set the repository **homepage** to the Shopify admin URL: `https://admin.shopify.com/store/your-store-name` (required for preview themes)
 2. Create `sgc-production` and `sgc-staging` branches containing only Shopify theme files
 3. Connect the SGC branches to Shopify via the GitHub Connector
-4. Optionally create `sgc-production-one-way` and/or `sgc-staging-one-way` branches for read-only theme mirrors
-5. Optionally set the `DISABLE_SGC_BACK_SYNC` repository variable to `true` to disable all back sync. When `false` or unset, production gets `.json`-only backfill + staging rebase; staging never backfills.
+4. Optionally create `release` and `sgc-release` branches for the release > staging > production flow
+5. Optionally create `sgc-production-one-way`, `sgc-staging-one-way`, and/or `sgc-release-one-way` branches for read-only theme mirrors
+6. Optionally set the `DISABLE_SGC_BACK_SYNC` repository variable to `true` to disable all back sync. When `false` or unset, production gets `.json`-only backfill + staging and release rebase chain; staging and release never backfill.
 
 ### Development
 

@@ -9,6 +9,13 @@ import { updateStagingOnProductionPush } from "../processes/update-staging-on-pr
 import { updateReleaseOnStagingPush } from "../processes/update-release-on-staging-push.js";
 import { updateSGCOnParentPush, syncToOneWayBranch } from "../processes/update-sgc-on-parent-push.js";
 import { handlePreviewTheme, deletePreviewTheme } from "../processes/handle-preview-theme.js";
+import { rebaseDownstreamPhaseStagingBranches } from "../processes/rebase-phase-staging-chain.js";
+import {
+  isStagingPhaseBranch,
+  sgcOneWayBranchForStagingPhase,
+  stagingPhaseParentFromSgcRefBranch,
+  isSgcStagingPhaseOneWayBranch
+} from "../utils/staging-phase-branches.js";
 
 const { APP_ID, PRIVATE_KEY, WEBHOOK_SECRET } = process.env;
 invariant(APP_ID, "APP_ID required");
@@ -99,6 +106,32 @@ webhooks.on("push", async ({ payload }) => {
   if (payload.deleted || !payload.head_commit || !payload.head_commit.message) return;
 
   const headCommitMessage = payload.head_commit.message.toLowerCase();
+  const branch = payload.ref.replace("refs/heads/", "");
+
+  if (isSgcStagingPhaseOneWayBranch(branch)) {
+    console.log(`[${owner}/${repo}] ${branch} updated - skipping sync back (one-way branch)`);
+    return;
+  }
+
+  if (isStagingPhaseBranch(branch)) {
+    await updateSGCOnParentPush(octokit, owner, repo, false, branch);
+    // Forward sync to downstream phases (like prod → staging): always, not gated by DISABLE_SGC_BACK_SYNC
+    await rebaseDownstreamPhaseStagingBranches(octokit, owner, repo, branch);
+    const phaseOneWay = sgcOneWayBranchForStagingPhase(branch);
+    if (await checkBranchExists(octokit, owner, repo, phaseOneWay)) {
+      console.log(`[${owner}/${repo}] Syncing ${branch} to ${phaseOneWay}...`);
+      await syncToOneWayBranch(octokit, owner, repo, branch, phaseOneWay);
+    }
+    return;
+  }
+
+  const sgcPhaseParent = stagingPhaseParentFromSgcRefBranch(branch);
+  if (sgcPhaseParent && headCommitMessage.includes("update from shopify")) {
+    console.log(
+      `[${owner}/${repo}] Skipping ${branch} to ${sgcPhaseParent} sync (${sgcPhaseParent} does not backfill from SGC)`
+    );
+    return;
+  }
 
   switch (payload.ref) {
     case "refs/heads/sgc-production":
@@ -174,11 +207,13 @@ webhooks.on("push", async ({ payload }) => {
     case "refs/heads/staging":
       await updateSGCOnParentPush(octokit, owner, repo, false, "staging");
 
-      // Rebase release onto staging when DISABLE_SGC_BACK_SYNC is false (keeps release in sync)
       const disableSgcBackSyncForStaging = await getRepoVariable(octokit, owner, repo, "DISABLE_SGC_BACK_SYNC");
       if (disableSgcBackSyncForStaging?.toLowerCase() !== "true") {
         await updateReleaseOnStagingPush(octokit, owner, repo);
       }
+
+      // staging → staging-phase-2 → staging-phase-3 → … (by numeric suffix, branches that exist only)
+      await rebaseDownstreamPhaseStagingBranches(octokit, owner, repo, "staging");
 
       // Sync to sgc-staging-one-way if it exists (one-way sync, never syncs back)
       if (await checkBranchExists(octokit, owner, repo, "sgc-staging-one-way")) {

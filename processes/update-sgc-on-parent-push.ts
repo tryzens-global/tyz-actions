@@ -1,4 +1,5 @@
 import { rateLimitedRequest, batchProcess } from "../utils/rate-limited-request.js";
+import { isStagingPhaseBranch } from "../utils/staging-phase-branches.js";
 
 /**
  * Syncs files from a source SGC branch to its one-way counterpart.
@@ -323,10 +324,18 @@ export async function syncToOneWayBranch(octokit: any, owner: string, repo: stri
   }
 }
 
-export async function updateSGCOnParentPush(octokit: any, owner: string, repo: string, includeJsonFiles: boolean = false, parent: "staging" | "production" | "release") {
+/** `parent` is `production`, `staging`, `release`, or `staging-phase-{n}` (SGC branch `sgc-${parent}`). */
+export async function updateSGCOnParentPush(
+  octokit: any,
+  owner: string,
+  repo: string,
+  includeJsonFiles: boolean = false,
+  parent: string
+) {
   try {
-    // Automatically include JSON files when updating sgc-staging or sgc-release
-    const shouldIncludeJson = includeJsonFiles || parent === "staging" || parent === "release";
+    // Automatically include JSON files when updating sgc-staging, sgc-release, or sgc-staging-phase-*
+    const shouldIncludeJson =
+      includeJsonFiles || parent === "staging" || parent === "release" || isStagingPhaseBranch(parent);
 
     // Get the latest commit SHA from ${parent} branch
     const parentRef = await rateLimitedRequest(
